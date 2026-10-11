@@ -6,3 +6,7 @@ Group Name: EasyEats
 Team Members: cicizhu2, jaylonw2, warrenh2, sdiaz66, mihirsd2
 
 Project Manager: speru4
+
+## Getting started
+
+See [Docs/RUN.md](Docs/RUN.md) for setup, configuration and known issues.
