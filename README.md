@@ -34,30 +34,8 @@ Replace words in CAPITALS, like `YOUR-USERNAME`, with your own value.
 
 ## 1. One-time setup
 
-Do this once per computer.
-
-**a. Make a GitHub account** at <https://github.com/signup> if you don't have one.
-
-**b. Install Git:** <https://git-scm.com/downloads>. Check it worked: `git --version`.
-
-**c. Install the GitHub CLI**, a tool that handles logging in to GitHub for you:
-<https://cli.github.com>. Check it worked: `gh --version`.
-
-**d. Log in to GitHub from the terminal:**
-```bash
-gh auth login
-```
-Answer the questions: **GitHub.com** → **HTTPS** → **Yes** (authenticate Git) →
-**Login with a web browser**. Copy the one-time code it shows, press Enter, paste the code in
-the browser and approve.
-
-**e. Tell Git who you are** (this name and email are attached to your commits):
-```bash
-git config --global user.name "Your Name"
-git config --global user.email "you@illinois.edu"
-```
-
-**f. Install what this project needs:**
+You already have a GitHub account and Git set up. Install what this project needs
+(once per computer):
 
 - **Node.js** (the **LTS** version, 20 or newer): <https://nodejs.org>
 - **Python 3.12**: <https://www.python.org/downloads/> (pick a 3.12.x release)
@@ -66,8 +44,6 @@ git config --global user.email "you@illinois.edu"
 
 Check they worked: `node --version`, `python3.12 --version` (Windows: `py -3.12 --version`)
 and `flutter --version`.
-
-**g. A code editor.** We recommend **VS Code**: <https://code.visualstudio.com>.
 
 ---
 
@@ -83,8 +59,13 @@ username → click **Create fork**. You now have
 **b. Clone your fork** into a folder on your computer:
 ```bash
 cd ~/Documents          # or wherever you keep your projects
-gh repo clone YOUR-USERNAME/FA26-MP-Codebases-EasyEats
+git clone https://github.com/YOUR-USERNAME/FA26-MP-Codebases-EasyEats.git
 cd FA26-MP-Codebases-EasyEats
+```
+
+**c. Connect the course repo too**, so you can get updates later if staff change something:
+```bash
+git remote add upstream https://github.com/CS196Illinois/FA26-MP-Codebases-EasyEats.git
 ```
 Every command from here on is run **inside this `FA26-MP-Codebases-EasyEats` folder**.
 To open it in VS Code: `code .`
@@ -190,8 +171,15 @@ A **pull request (PR)** asks the course repo to look at your changes. It's how y
    **base repository: `CS196Illinois/FA26-MP-Codebases-EasyEats`** · **base: `main`** ←
    **head repository: `YOUR-USERNAME/FA26-MP-Codebases-EasyEats`** · **compare: `your-branch`**
 4. Give it a clear **title**, e.g. *"Fix crash on profile page when not logged in"*.
-5. **Fill in every section of the description.** A template appears automatically. Write your
-   answers outside the `<!-- -->` comments, and tick the checklist boxes.
+5. **Fill in the description.** A template appears automatically. Write your answers
+   outside the `<!-- -->` comments. These parts are **required**:
+   - **Name** and **NetID**
+   - **What did you change?**
+   - **Why?**
+   - **How did you test it?**
+   - **Checklist**: tick both boxes (change `[ ]` to `[x]`)
+
+   **Screenshots** is optional, but helpful if you changed anything visible.
 6. Click **Create pull request**.
 
 **An automatic check then runs.** Scroll down after a few seconds:
@@ -221,12 +209,15 @@ Don't open a second PR for the same work.
 
 **`git push` says "Permission denied" or "403".**
 You cloned the course repo instead of your fork. Fix it without losing your work:
+1. Make your fork on GitHub if you haven't yet (section 2a).
+2. Point your copy at your fork and push:
 ```bash
-gh repo fork --remote        # makes (or finds) your fork and points "origin" at it
+git remote rename origin upstream
+git remote add origin https://github.com/YOUR-USERNAME/FA26-MP-Codebases-EasyEats.git
 git push -u origin HEAD
 ```
 
-**"command not found" (`git`, `gh`, `node`, `python3.12`, `flutter`…).**
+**"command not found" (`node`, `python3.12`, `flutter`…).**
 The tool isn't installed, or the terminal was open before you installed it. Close the
 terminal, open a new one, and try again. If it still fails, reinstall from section 1.
 
