@@ -5,13 +5,64 @@ const path = require('path');
 const auth = require('./auth');
 const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
+const recs = require('./recommendations');
+const { isValidQuantity, computeTotals, MAX_QUANTITY } = require('./mealTotals');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// EASYEATS_DATA_DIR lets tests run against a throwaway data directory
+const DATA_DIR = process.env.EASYEATS_DATA_DIR || path.join(__dirname, 'data');
+
 // Database connection
-const dbPath = path.join(__dirname, 'data', 'nutrition_data.db');
+const dbPath = path.join(DATA_DIR, 'nutrition_data.db');
 const db = new sqlite3.Database(dbPath);
+
+// Databases created before dietary labels existed lack these columns; add them so queries work.
+// Rows without labels simply have no dietary tags (unknown), which the filter treats as unsafe.
+const DIETARY_COLUMNS = ['ingredients', 'allergens', 'dietary_tags', 'tags_source'];
+const dietaryColumnsReady = new Promise((resolve) => {
+    db.all('PRAGMA table_info(nutrition_data)', [], (err, cols) => {
+        if (err || !cols || cols.length === 0) return resolve();
+        const have = new Set(cols.map((c) => c.name));
+        const missing = DIETARY_COLUMNS.filter((c) => !have.has(c));
+        db.serialize(() => {
+            missing.forEach((c) => db.run(`ALTER TABLE nutrition_data ADD COLUMN ${c} TEXT`));
+            db.run('SELECT 1', [], () => resolve());
+        });
+    });
+});
+
+async function dbAll(sql, params = []) {
+    await dietaryColumnsReady;
+    return new Promise((resolve, reject) => {
+        db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
+    });
+}
+
+function getProfile(userId) {
+    return new Promise((resolve, reject) => {
+        auth.getUserProfile(userId, (err, user) => (err ? reject(err) : resolve(user)));
+    });
+}
+
+const FOOD_COLUMNS = `name, category, serving_size, calories, protein, total_fat,
+        total_carbohydrate, dietary_fiber, sugars, sodium, ingredients, allergens, dietary_tags`;
+
+// Every row for a hall/meal, merged so each dish appears once (see mergeByName for tag safety)
+async function loadHallFoods(hall, { mealType, date } = {}) {
+    let query = `SELECT ${FOOD_COLUMNS} FROM nutrition_data WHERE dining_hall LIKE ?`;
+    const params = [`%${hall}%`];
+    if (mealType) {
+        query += ' AND meal_type = ?';
+        params.push(mealType);
+    }
+    if (date) {
+        query += ' AND date = ?';
+        params.push(date);
+    }
+    return recs.mergeByName(await dbAll(query, params));
+}
 
 // Middleware
 app.use(cors());
@@ -233,40 +284,41 @@ app.get('/api/dining-halls', (req, res) => {
 });
 
 // Get foods for a specific dining hall and meal type
-app.get('/api/dining-halls/:hall/foods', (req, res) => {
+// With user_id and apply_restrictions=true, only foods that meet that user's dietary restrictions are returned.
+app.get('/api/dining-halls/:hall/foods', async (req, res) => {
     const { hall } = req.params;
-    const { meal_type, date } = req.query;
+    const { meal_type, date, user_id, apply_restrictions } = req.query;
 
-    let query = `
-        SELECT DISTINCT name, category, serving_size, calories, protein,
-               total_fat, total_carbohydrate, dietary_fiber, sugars, sodium
-        FROM nutrition_data
-        WHERE dining_hall LIKE ?
-    `;
-    const params = [`%${hall}%`];
+    try {
+        let foods = await loadHallFoods(hall, { mealType: meal_type, date });
+        const body = {};
 
-    if (meal_type) {
-        query += ` AND meal_type = ?`;
-        params.push(meal_type);
-    }
-
-    if (date) {
-        query += ` AND date = ?`;
-        params.push(date);
-    }
-
-    query += ` GROUP BY name ORDER BY category, name`;
-
-    db.all(query, params, (err, rows) => {
-        if (err) {
-            return res.status(500).json({ error: 'Database error', details: err.message });
+        if (apply_restrictions === 'true') {
+            if (!user_id) {
+                return res.status(400).json({ error: 'user_id is required to apply restrictions' });
+            }
+            const user = await getProfile(parseInt(user_id));
+            const result = recs.applyRestrictions(foods, user.dietary_restrictions);
+            foods = result.foods;
+            body.restrictions_applied = result.applied;
+            body.unsupported_restrictions = result.unsupported;
+            body.excluded_count = result.excluded;
+            if (foods.length === 0 && result.applied.length > 0) {
+                body.message = recs.emptyMessage(result.applied, meal_type);
+            }
         }
-        res.json({ foods: rows, count: rows.length });
-    });
+
+        foods.sort((a, b) => (a.category || '').localeCompare(b.category || '') || a.name.localeCompare(b.name));
+        res.json({ foods, count: foods.length, ...body });
+    } catch (err) {
+        if (err && err.error === 'User not found') return res.status(404).json(err);
+        res.status(500).json({ error: 'Database error', details: err.message || String(err) });
+    }
 });
 
 // Get recommended foods for user based on goals
-app.get('/api/recommendations/:userId', (req, res) => {
+// Restrictions are applied first; what is left is ranked for the user's goal.
+app.get('/api/recommendations/:userId', async (req, res) => {
     const userId = parseInt(req.params.userId);
     const { dining_hall, meal_type } = req.query;
 
@@ -274,60 +326,79 @@ app.get('/api/recommendations/:userId', (req, res) => {
         return res.status(400).json({ error: 'dining_hall is required' });
     }
 
-    // Get user profile to understand their goals
-    auth.getUserProfile(userId, (err, user) => {
-        if (err) {
-            return res.status(404).json(err);
-        }
-
+    try {
+        const user = await getProfile(userId);
         const targetCaloriesPerMeal = Math.floor((user.calories || 2000) / 3);
 
-        // Get foods from the dining hall
-        let query = `
-            SELECT DISTINCT name, category, serving_size, calories, protein,
-                   total_fat, total_carbohydrate, dietary_fiber, sugars, sodium,
-                   (protein * 4.0 / NULLIF(calories, 0)) as protein_ratio,
-                   (total_fat * 9.0 / NULLIF(calories, 0)) as fat_ratio
-            FROM nutrition_data
-            WHERE dining_hall LIKE ?
-            AND calories > 0
-        `;
-        const params = [`%${dining_hall}%`];
+        const allFoods = await loadHallFoods(dining_hall, { mealType: meal_type });
+        const result = recs.applyRestrictions(allFoods, user.dietary_restrictions);
+        const ranked = recs.rankFoods(result.foods, user.goal, targetCaloriesPerMeal).slice(0, 20);
 
-        if (meal_type) {
-            query += ` AND meal_type = ?`;
-            params.push(meal_type);
+        const body = {
+            recommendations: ranked,
+            user_target_calories: targetCaloriesPerMeal,
+            goal: user.goal,
+            count: ranked.length,
+            restrictions_applied: result.applied,
+            unsupported_restrictions: result.unsupported,
+            excluded_count: result.excluded,
+        };
+        if (ranked.length === 0 && result.applied.length > 0 && allFoods.length > 0) {
+            body.message = recs.emptyMessage(result.applied, meal_type);
+        }
+        res.json(body);
+    } catch (err) {
+        if (err && err.error === 'User not found') return res.status(404).json(err);
+        res.status(500).json({ error: 'Database error', details: err.message || String(err) });
+    }
+});
+
+// Which dining hall best fits this user's restrictions and goal for a meal
+app.get('/api/recommendations/:userId/dining-halls', async (req, res) => {
+    const userId = parseInt(req.params.userId);
+    const { meal_type } = req.query;
+
+    try {
+        const user = await getProfile(userId);
+        const targetCaloriesPerMeal = Math.floor((user.calories || 2000) / 3);
+        const halls = (await dbAll('SELECT DISTINCT dining_hall FROM nutrition_data ORDER BY dining_hall'))
+            .map((r) => r.dining_hall);
+
+        const summaries = [];
+        for (const hall of halls) {
+            const foods = await loadHallFoods(hall, { mealType: meal_type });
+            summaries.push({
+                dining_hall: hall,
+                ...recs.summarizeHall(foods, user.goal, targetCaloriesPerMeal, user.dietary_restrictions),
+            });
         }
 
-        // Score foods based on nutrition
-        query += `
-            GROUP BY name
-            ORDER BY
-                (protein * 4.0 / NULLIF(calories, 0)) DESC,
-                (total_fat * 9.0 / NULLIF(calories, 0)) ASC,
-                dietary_fiber DESC
-            LIMIT 20
-        `;
+        const ranked = recs.rankHalls(summaries);
+        const best = ranked.length > 0 && ranked[0].matching_count > 0 ? ranked[0] : null;
+        const restrictions = recs.applyRestrictions([], user.dietary_restrictions);
 
-        db.all(query, params, (err, foods) => {
-            if (err) {
-                return res.status(500).json({ error: 'Database error', details: err.message });
-            }
-
-            res.json({
-                recommendations: foods,
-                user_target_calories: targetCaloriesPerMeal,
-                goal: user.goal,
-                count: foods.length
-            });
-        });
-    });
+        const body = {
+            meal_type: meal_type || null,
+            goal: user.goal,
+            best,
+            dining_halls: ranked,
+            restrictions_applied: restrictions.applied,
+            unsupported_restrictions: restrictions.unsupported,
+        };
+        if (!best && restrictions.applied.length > 0) {
+            body.message = recs.emptyMessage(restrictions.applied, meal_type);
+        }
+        res.json(body);
+    } catch (err) {
+        if (err && err.error === 'User not found') return res.status(404).json(err);
+        res.status(500).json({ error: 'Database error', details: err.message || String(err) });
+    }
 });
 
 // ============ MEAL TRACKING ENDPOINTS ============
 
 // Initialize meal tracking database
-const mealTrackingDbPath = path.join(__dirname, 'data', 'meal_tracking.json');
+const mealTrackingDbPath = path.join(DATA_DIR, 'meal_tracking.json');
 
 // Helper function to read meal tracking data
 function readMealTracking() {
@@ -362,6 +433,14 @@ app.post('/api/user/:userId/meals', (req, res) => {
         return res.status(400).json({ error: 'foods array is required' });
     }
 
+    // Each food may carry a quantity (servings eaten, default 1); totals scale by it
+    const badFood = foods.find((f) => !isValidQuantity(f));
+    if (badFood) {
+        return res.status(400).json({
+            error: `quantity for "${badFood.name}" must be a number greater than 0 and at most ${MAX_QUANTITY}`
+        });
+    }
+
     const trackingData = readMealTracking();
 
     const mealEntry = {
@@ -371,13 +450,7 @@ app.post('/api/user/:userId/meals', (req, res) => {
         dining_hall: dining_hall || 'Unknown',
         consumed_at: consumed_at || new Date().toISOString(),
         foods: foods,
-        totals: {
-            calories: foods.reduce((sum, f) => sum + (f.calories || 0), 0),
-            protein: foods.reduce((sum, f) => sum + (f.protein || 0), 0),
-            fat: foods.reduce((sum, f) => sum + (f.total_fat || 0), 0),
-            carbs: foods.reduce((sum, f) => sum + (f.total_carbohydrate || 0), 0),
-            fiber: foods.reduce((sum, f) => sum + (f.dietary_fiber || 0), 0),
-        }
+        totals: computeTotals(foods)
     };
 
     trackingData.meals.push(mealEntry);
@@ -473,12 +546,16 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Start server
-app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Authentication endpoints available at:`);
-    console.log(`  POST http://localhost:${PORT}/api/auth/register`);
-    console.log(`  POST http://localhost:${PORT}/api/auth/login`);
-    console.log(`  PUT  http://localhost:${PORT}/api/user/:userId/profile`);
-    console.log(`  GET  http://localhost:${PORT}/api/user/:userId/profile`);
-});
+// Start server (tests import the app and listen on their own port)
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`Server running on http://localhost:${PORT}`);
+        console.log(`Authentication endpoints available at:`);
+        console.log(`  POST http://localhost:${PORT}/api/auth/register`);
+        console.log(`  POST http://localhost:${PORT}/api/auth/login`);
+        console.log(`  PUT  http://localhost:${PORT}/api/user/:userId/profile`);
+        console.log(`  GET  http://localhost:${PORT}/api/user/:userId/profile`);
+    });
+}
+
+module.exports = app;

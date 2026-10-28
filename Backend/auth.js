@@ -3,11 +3,13 @@ const crypto = require('crypto');
 const path = require('path');
 
 // Database file path (JSON file)
-const DB_FILE = path.join(__dirname, 'data', 'users.json');
+// EASYEATS_DATA_DIR lets tests run against a throwaway data directory
+const DATA_DIR = process.env.EASYEATS_DATA_DIR || path.join(__dirname, 'data');
+const DB_FILE = path.join(DATA_DIR, 'users.json');
 
 // Initialize database file if it doesn't exist
 function initializeDatabase() {
-    const dataDir = path.join(__dirname, 'data');
+    const dataDir = DATA_DIR;
 
     // Create data directory if it doesn't exist
     if (!fs.existsSync(dataDir)) {

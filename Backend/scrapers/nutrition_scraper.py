@@ -473,7 +473,10 @@ class NutritionScraperComplete:
         nutrition_info = {
             'name': food_name,
             'serving_size': None,
-            'nutrition': {}
+            'nutrition': {},
+            'ingredients': None,
+            'allergens': None,   # None = the site gave no allergen info (unknown)
+            'labels': []
         }
         
         try:
@@ -532,11 +535,49 @@ class NutritionScraperComplete:
                             if value:
                                 nutrition_info['nutrition'][key] = value
                             break
-            
+
+            nutrition_info.update(self.extract_dietary_info(modal_body, lines))
+
         except Exception as e:
             print(f"       ERROR extracting nutrition: {str(e)}")
-        
+
         return nutrition_info
+
+    def extract_dietary_info(self, modal_body, lines):
+        """Extract ingredients, declared allergens and diet icons from the item modal.
+
+        allergens stays None unless the modal has an allergen line, so items the site
+        says nothing about are never reported as allergen-free.
+        """
+        info = {'ingredients': None, 'allergens': None, 'labels': []}
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            lower = stripped.lower()
+
+            if lower.startswith('ingredients') or lower.startswith('allergens') or lower.startswith('contains'):
+                value = stripped.split(':', 1)[1].strip() if ':' in stripped else ''
+                # The value is sometimes rendered on the line after its label
+                if not value and i + 1 < len(lines):
+                    value = lines[i + 1].strip()
+
+                if lower.startswith('ingredients'):
+                    info['ingredients'] = value or None
+                elif info['allergens'] is None:
+                    # Not 'None': pandas reads that text back from Excel as an empty cell
+                    info['allergens'] = value or 'No allergens listed'
+
+        # Diet icons (vegan, vegetarian, halal, ...) are images whose alt/title name them
+        try:
+            for img in modal_body.find_elements(By.TAG_NAME, 'img'):
+                for attr in ('alt', 'title'):
+                    label = (img.get_attribute(attr) or '').strip()
+                    if label and label not in info['labels']:
+                        info['labels'].append(label)
+        except Exception:
+            pass
+
+        return info
     
     def parse_nutrition_value(self, value_str):
         """Parse nutrition value and convert to grams (standardized format)
@@ -763,7 +804,10 @@ class NutritionScraperComplete:
                                 'total_carbohydrate': self.parse_nutrition_value(item_data.get('nutrition', {}).get('total_carbohydrate', '0')),
                                 'dietary_fiber': self.parse_nutrition_value(item_data.get('nutrition', {}).get('dietary_fiber', '0')),
                                 'sugars': self.parse_nutrition_value(item_data.get('nutrition', {}).get('sugars', '0')),
-                                'protein': self.parse_nutrition_value(item_data.get('nutrition', {}).get('protein', '0'))
+                                'protein': self.parse_nutrition_value(item_data.get('nutrition', {}).get('protein', '0')),
+                                'ingredients': item_data.get('ingredients'),
+                                'allergens': item_data.get('allergens'),
+                                'dietary_labels': '; '.join(item_data.get('labels') or []) or None
                             }
                             all_results.append(result)
 
@@ -826,7 +870,8 @@ class NutritionScraperComplete:
             column_order = [
                 'dining_hall', 'service', 'date', 'meal_type', 'category', 'name', 'serving_size',
                 'calories', 'total_fat', 'saturated_fat', 'trans_fat', 'cholesterol',
-                'sodium', 'potassium', 'total_carbohydrate', 'dietary_fiber', 'sugars', 'protein'
+                'sodium', 'potassium', 'total_carbohydrate', 'dietary_fiber', 'sugars', 'protein',
+                'ingredients', 'allergens', 'dietary_labels'
             ]
             # Only keep columns that actually exist in df to avoid KeyError
             column_order = [c for c in column_order if c in df.columns]

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'home_page.dart' as home;
 import 'settings_page.dart';
 import 'dining_hall_detail_page.dart';
+import '../widgets/best_hall_banner.dart';
 
 class MainPage extends StatelessWidget {
   const MainPage({super.key});
@@ -88,6 +89,9 @@ class MainPage extends StatelessWidget {
               ),
 
               const SizedBox(height: 20),
+
+              // Dining hall that best fits the user's restrictions and goal
+              const BestHallBanner(),
 
               // Image banner with text overlay
               //Dining Hall

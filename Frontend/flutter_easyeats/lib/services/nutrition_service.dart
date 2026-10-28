@@ -31,12 +31,33 @@ class NutritionService {
     String? mealType,
     String? date,
   }) async {
+    final result = await getFoodListResult(
+      diningHall,
+      mealType: mealType,
+      date: date,
+    );
+    return result.foods;
+  }
+
+  // Get foods for a dining hall, optionally limited to those that meet the
+  // user's dietary restrictions. Also returns why the list is empty, if it is.
+  static Future<FoodListResult> getFoodListResult(
+    String diningHall, {
+    String? mealType,
+    String? date,
+    int? userId,
+    bool applyRestrictions = false,
+  }) async {
     try {
-      var uri = Uri.parse('$baseUrl/dining-halls/$diningHall/foods');
+      var uri = Uri.parse('$baseUrl/dining-halls/${Uri.encodeComponent(diningHall)}/foods');
 
       final queryParams = <String, String>{};
       if (mealType != null) queryParams['meal_type'] = mealType;
       if (date != null) queryParams['date'] = date;
+      if (applyRestrictions && userId != null) {
+        queryParams['user_id'] = userId.toString();
+        queryParams['apply_restrictions'] = 'true';
+      }
 
       uri = uri.replace(queryParameters: queryParams);
 
@@ -47,8 +68,7 @@ class NutritionService {
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        final foodsList = data['foods'] as List;
-        return foodsList.map((f) => FoodItem.fromJson(f)).toList();
+        return FoodListResult.fromJson(data, 'foods');
       } else {
         throw Exception('Failed to load foods');
       }
@@ -57,7 +77,32 @@ class NutritionService {
     }
   }
 
-  // Get recommended foods for user
+  // Which dining hall best fits the user's restrictions and goal for a meal
+  static Future<HallRecommendation> getBestDiningHall(
+    int userId,
+    String mealType,
+  ) async {
+    try {
+      final uri = Uri.parse('$baseUrl/recommendations/$userId/dining-halls')
+          .replace(queryParameters: {'meal_type': mealType});
+
+      final response = await http.get(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+      );
+
+      if (response.statusCode == 200) {
+        return HallRecommendation.fromJson(json.decode(response.body));
+      } else {
+        throw Exception('Failed to load dining hall recommendation');
+      }
+    } catch (e) {
+      throw Exception('Network error: ${e.toString()}');
+    }
+  }
+
+  // Get recommended foods for user. Foods that do not meet the user's dietary
+  // restrictions are already removed by the server; 'message' explains an empty list.
   static Future<Map<String, dynamic>> getRecommendations(
     int userId,
     String diningHall, {
@@ -85,6 +130,9 @@ class NutritionService {
           'user_target_calories': data['user_target_calories'],
           'goal': data['goal'],
           'count': data['count'],
+          'message': data['message'],
+          'restrictions_applied': List<String>.from(data['restrictions_applied'] ?? []),
+          'unsupported_restrictions': List<String>.from(data['unsupported_restrictions'] ?? []),
         };
       } else {
         throw Exception('Failed to load recommendations');
@@ -197,5 +245,57 @@ class NutritionService {
     } catch (e) {
       throw Exception('Network error: ${e.toString()}');
     }
+  }
+}
+
+/// A list of foods plus what the server did to it (restrictions applied, why it is empty).
+class FoodListResult {
+  final List<FoodItem> foods;
+  final String? message;
+  final List<String> restrictionsApplied;
+  final List<String> unsupportedRestrictions;
+
+  FoodListResult({
+    required this.foods,
+    this.message,
+    this.restrictionsApplied = const [],
+    this.unsupportedRestrictions = const [],
+  });
+
+  factory FoodListResult.fromJson(Map<String, dynamic> json, String key) {
+    return FoodListResult(
+      foods: (json[key] as List).map((f) => FoodItem.fromJson(f)).toList(),
+      message: json['message'],
+      restrictionsApplied: List<String>.from(json['restrictions_applied'] ?? []),
+      unsupportedRestrictions: List<String>.from(json['unsupported_restrictions'] ?? []),
+    );
+  }
+}
+
+/// The dining hall that best fits the user for a meal, or null best when none can serve them.
+class HallRecommendation {
+  final String? bestHall;
+  final int matchingCount;
+  final List<String> topFoods;
+  final String? message;
+  final List<String> restrictionsApplied;
+
+  HallRecommendation({
+    this.bestHall,
+    this.matchingCount = 0,
+    this.topFoods = const [],
+    this.message,
+    this.restrictionsApplied = const [],
+  });
+
+  factory HallRecommendation.fromJson(Map<String, dynamic> json) {
+    final best = json['best'];
+    return HallRecommendation(
+      bestHall: best?['dining_hall'],
+      matchingCount: best?['matching_count'] ?? 0,
+      topFoods: List<String>.from(best?['top_foods'] ?? []),
+      message: json['message'],
+      restrictionsApplied: List<String>.from(json['restrictions_applied'] ?? []),
+    );
   }
 }

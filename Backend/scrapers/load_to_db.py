@@ -6,6 +6,8 @@ import pandas as pd
 import os
 from datetime import datetime
 
+from dietary_tags import derive_tags, serialize_tags
+
 
 def create_nutrition_table(conn):
     """Create the nutrition table if it doesn't exist"""
@@ -32,6 +34,10 @@ def create_nutrition_table(conn):
             dietary_fiber REAL,
             sugars REAL,
             protein REAL,
+            ingredients TEXT,
+            allergens TEXT,
+            dietary_tags TEXT,
+            tags_source TEXT,
             scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -52,8 +58,19 @@ def create_nutrition_table(conn):
         ON nutrition_data(name)
     ''')
 
+    # Databases created before dietary labels existed need the new columns
+    existing = {row[1] for row in cursor.execute('PRAGMA table_info(nutrition_data)')}
+    for column in ('ingredients', 'allergens', 'dietary_tags', 'tags_source'):
+        if column not in existing:
+            cursor.execute(f'ALTER TABLE nutrition_data ADD COLUMN {column} TEXT')
+
     conn.commit()
     print("✓ Table 'nutrition_data' created/verified")
+
+
+def _text_or_none(value):
+    """Excel cells come back as NaN when empty; keep those as None (unknown)."""
+    return str(value).strip() if pd.notna(value) and str(value).strip() else None
 
 
 def load_excel_to_database(excel_file, db_file='../data/nutrition_data.db'):
@@ -100,13 +117,23 @@ def load_excel_to_database(excel_file, db_file='../data/nutrition_data.db'):
 
     for idx, row in df.iterrows():
         try:
+            ingredients = _text_or_none(row.get('ingredients'))
+            allergens = _text_or_none(row.get('allergens'))
+            labels = _text_or_none(row.get('dietary_labels'))
+            tags, tags_source = derive_tags(
+                row.get('name', ''),
+                allergens=allergens,
+                labels=labels.split('; ') if labels else None,
+            )
+
             cursor.execute('''
                 INSERT INTO nutrition_data (
                     dining_hall, service, date, meal_type, category, name,
                     serving_size, calories, total_fat, saturated_fat, trans_fat,
                     cholesterol, sodium, potassium, total_carbohydrate,
-                    dietary_fiber, sugars, protein
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    dietary_fiber, sugars, protein,
+                    ingredients, allergens, dietary_tags, tags_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 row.get('dining_hall', ''),
                 row.get('service', ''),
@@ -125,7 +152,11 @@ def load_excel_to_database(excel_file, db_file='../data/nutrition_data.db'):
                 float(row.get('total_carbohydrate', 0)) if pd.notna(row.get('total_carbohydrate')) else 0.0,
                 float(row.get('dietary_fiber', 0)) if pd.notna(row.get('dietary_fiber')) else 0.0,
                 float(row.get('sugars', 0)) if pd.notna(row.get('sugars')) else 0.0,
-                float(row.get('protein', 0)) if pd.notna(row.get('protein')) else 0.0
+                float(row.get('protein', 0)) if pd.notna(row.get('protein')) else 0.0,
+                ingredients,
+                allergens,
+                serialize_tags(tags),
+                tags_source
             ))
             inserted += 1
         except Exception as e:

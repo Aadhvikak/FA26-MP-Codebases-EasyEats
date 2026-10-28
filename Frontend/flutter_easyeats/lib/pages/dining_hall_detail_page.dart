@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/food_item.dart';
 import '../services/nutrition_service.dart';
 import '../services/user_service.dart';
+import '../widgets/quantity_dialog.dart';
 
 class DiningHallDetailPage extends StatefulWidget {
   final String diningHallName;
@@ -27,6 +28,13 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
   String _userGoal = '';
   String _error = '';
   String _searchQuery = '';
+
+  // Dietary restrictions the server applied to the recommendations (always on, for safety)
+  List<String> _restrictionsApplied = [];
+  List<String> _unsupportedRestrictions = [];
+  String? _recommendationsMessage;
+  String? _allFoodsMessage;
+  bool _applyToAllFoods = true;
 
   final List<String> _mealTypes = ['Breakfast', 'Lunch', 'Dinner'];
 
@@ -83,6 +91,9 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
 
       setState(() {
         _recommendations = result['recommendations'];
+        _recommendationsMessage = result['message'];
+        _restrictionsApplied = result['restrictions_applied'];
+        _unsupportedRestrictions = result['unsupported_restrictions'];
         if (_recommendations.isEmpty) {
           _error = '';
         }
@@ -90,6 +101,7 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
     } catch (e) {
       setState(() {
         _recommendations = [];
+        _recommendationsMessage = null;
         _error = '';
       });
     }
@@ -97,13 +109,16 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
 
   Future<void> _loadAllFoods() async {
     try {
-      final foods = await NutritionService.getFoodsForDiningHall(
+      final result = await NutritionService.getFoodListResult(
         widget.diningHallName,
         mealType: _selectedMealType,
+        userId: _userId,
+        applyRestrictions: _applyToAllFoods,
       );
 
       setState(() {
-        _allFoods = foods;
+        _allFoods = result.foods;
+        _allFoodsMessage = result.message;
         if (_allFoods.isEmpty) {
           _error = '';
         }
@@ -111,24 +126,57 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
     } catch (e) {
       setState(() {
         _allFoods = [];
+        _allFoodsMessage = null;
         _error = '';
       });
     }
   }
 
-  void _toggleFoodSelection(FoodItem food) {
+  int _selectedIndex(FoodItem food) {
+    return _selectedFoods.indexWhere((f) => f.name == food.name);
+  }
+
+  bool _isFoodSelected(FoodItem food) => _selectedIndex(food) >= 0;
+
+  // Ask how many servings; picking again on a selected food edits (or removes) it
+  Future<void> _promptForQuantity(FoodItem food) async {
+    final index = _selectedIndex(food);
+    final existing = index >= 0 ? _selectedFoods[index] : null;
+
+    final quantity = await showQuantityDialog(
+      context,
+      food,
+      initial: existing?.quantity ?? 1,
+      allowRemove: existing != null,
+    );
+    if (quantity == null || !mounted) return;
+
     setState(() {
-      final index = _selectedFoods.indexWhere((f) => f.name == food.name);
-      if (index >= 0) {
-        _selectedFoods.removeAt(index);
+      // The list can change while the dialog is open, so look the food up again
+      final current = _selectedIndex(food);
+      if (quantity == 0) {
+        if (current >= 0) _selectedFoods.removeAt(current);
+      } else if (current >= 0) {
+        _selectedFoods[current] = food.withQuantity(quantity);
       } else {
-        _selectedFoods.add(food);
+        _selectedFoods.add(food.withQuantity(quantity));
       }
     });
   }
 
-  bool _isFoodSelected(FoodItem food) {
-    return _selectedFoods.any((f) => f.name == food.name);
+  void _removeFood(FoodItem food) {
+    setState(() {
+      _selectedFoods.removeWhere((f) => f.name == food.name);
+    });
+  }
+
+  // Tags worth showing; vegan already implies vegetarian, dairy-free and egg-free
+  List<String> _displayTags(FoodItem food) {
+    final tags = food.dietaryTags.toSet();
+    if (tags.contains('vegan')) {
+      tags.removeAll(['vegetarian', 'dairy-free', 'egg-free']);
+    }
+    return tags.toList()..sort();
   }
 
   Future<void> _logMeal() async {
@@ -171,6 +219,12 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
     }
   }
 
+  // The server's explanation when the list is empty because of dietary restrictions
+  String? get _restrictionMessage {
+    if (_searchQuery.isNotEmpty) return null;
+    return _showRecommendations ? _recommendationsMessage : _allFoodsMessage;
+  }
+
   List<FoodItem> get _filteredFoods {
     final foods = _showRecommendations ? _recommendations : _allFoods;
 
@@ -185,11 +239,15 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
   }
 
   double get _selectedTotalCalories {
-    return _selectedFoods.fold(0, (sum, food) => sum + food.calories);
+    return _selectedFoods.fold(0, (sum, food) => sum + food.caloriesEaten);
   }
 
   double get _selectedTotalProtein {
-    return _selectedFoods.fold(0, (sum, food) => sum + food.protein);
+    return _selectedFoods.fold(0, (sum, food) => sum + food.proteinEaten);
+  }
+
+  double get _selectedServings {
+    return _selectedFoods.fold(0, (sum, food) => sum + food.quantity);
   }
 
   @override
@@ -321,6 +379,62 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
               ),
             ),
 
+          // Dietary restrictions being applied
+          if (_restrictionsApplied.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              padding: const EdgeInsets.fromLTRB(12, 8, 4, 4),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.green.shade200),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.verified_user, color: Colors.green.shade700, size: 18),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Matching your restrictions: ${_restrictionsApplied.join(', ')}',
+                          style: TextStyle(fontSize: 12, color: Colors.green.shade900),
+                        ),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Also filter All Foods',
+                          style: TextStyle(fontSize: 12, color: Colors.green.shade900),
+                        ),
+                      ),
+                      Switch(
+                        value: _applyToAllFoods,
+                        activeThumbColor: Colors.green,
+                        onChanged: (value) {
+                          setState(() => _applyToAllFoods = value);
+                          _loadAllFoods();
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+          if (_unsupportedRestrictions.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Text(
+                "Not filtered (can't be checked from menu data): ${_unsupportedRestrictions.join(', ')}",
+                style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
+              ),
+            ),
+
           // Error message
           if (_error.isNotEmpty)
             Container(
@@ -345,10 +459,15 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Icon(Icons.restaurant_menu_outlined, size: 80, color: Colors.grey[300]),
+                              Icon(
+                                _restrictionMessage != null ? Icons.no_food_outlined : Icons.restaurant_menu_outlined,
+                                size: 80,
+                                color: Colors.grey[300],
+                              ),
                               const SizedBox(height: 24),
                               Text(
-                                'Oops! It seems like there are no meals being served at this dining hall currently.',
+                                _restrictionMessage ??
+                                    'Oops! It seems like there are no meals being served at this dining hall currently.',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   fontSize: 16,
@@ -360,7 +479,9 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
                               Text(
                                 _searchQuery.isNotEmpty
                                     ? 'Try adjusting your search or check back later.'
-                                    : 'Try selecting a different dining hall or check back later.',
+                                    : _restrictionMessage != null
+                                        ? 'Try a different dining hall or meal.'
+                                        : 'Try selecting a different dining hall or check back later.',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   fontSize: 14,
@@ -377,6 +498,9 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
                         itemBuilder: (context, index) {
                           final food = _filteredFoods[index];
                           final isSelected = _isFoodSelected(food);
+                          final servings = isSelected
+                              ? _selectedFoods[_selectedIndex(food)].quantity
+                              : 0.0;
 
                           return Card(
                             margin: const EdgeInsets.only(bottom: 12),
@@ -389,7 +513,7 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
                               ),
                             ),
                             child: InkWell(
-                              onTap: () => _toggleFoodSelection(food),
+                              onTap: () => _promptForQuantity(food),
                               borderRadius: BorderRadius.circular(12),
                               child: Padding(
                                 padding: const EdgeInsets.all(16),
@@ -397,7 +521,9 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
                                   children: [
                                     Checkbox(
                                       value: isSelected,
-                                      onChanged: (_) => _toggleFoodSelection(food),
+                                      onChanged: (_) => isSelected
+                                          ? _removeFood(food)
+                                          : _promptForQuantity(food),
                                       activeColor: Colors.green,
                                     ),
                                     const SizedBox(width: 12),
@@ -446,6 +572,29 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
                                               ),
                                             ],
                                           ),
+                                          if (_displayTags(food).isNotEmpty) ...[
+                                            const SizedBox(height: 8),
+                                            Wrap(
+                                              spacing: 6,
+                                              runSpacing: 4,
+                                              children: _displayTags(food)
+                                                  .map((t) => _buildNutrientChip(t, Colors.teal))
+                                                  .toList(),
+                                            ),
+                                          ],
+                                          if (isSelected) ...[
+                                            const SizedBox(height: 8),
+                                            Text(
+                                              '${formatServings(servings)} ${servings == 1 ? 'serving' : 'servings'}'
+                                              ' • ${(food.calories * servings).round()} cal  (tap to change)',
+                                              key: Key('servings_${food.name}'),
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.bold,
+                                                color: Colors.green.shade800,
+                                              ),
+                                            ),
+                                          ],
                                         ],
                                       ),
                                     ),
@@ -483,7 +632,7 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              '${_selectedFoods.length} items selected',
+                              '${_selectedFoods.length} items • ${formatServings(_selectedServings)} servings',
                               style: const TextStyle(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 16,
